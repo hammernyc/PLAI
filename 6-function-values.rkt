@@ -123,8 +123,16 @@
                   mt-env)
           (numV 7))
 
-; 8
 
-(test (interp (desugar (plusS (numS 10) (appS (lamS '_ (numS 5)) (numS 10))))
-                mt-env)
-        (numV 15))
+; test let (syntactic sugar for lambda)
+
+(test (interp (desugar
+               (letS 'x (numS 10) (plusS (idS 'x) (idS 'x)))
+              ) mt-env)
+      (numV 20))
+
+(test (interp (desugar
+               (letS 'double (lamS  'x (plusS (idS 'x) (idS 'x))) (appS (idS 'double) (numS 20)))
+              ) mt-env)
+      (numV 40))
+
