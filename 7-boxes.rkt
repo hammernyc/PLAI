@@ -4,7 +4,8 @@
 
 (define-type Value
     [numV (n : number)]
-    [closV (arg : symbol) (body : ExprC) (env : Env)])
+    [closV (arg : symbol) (body : ExprC) (env : Env)]
+    [boxV (l : Location)])
 
 (define-type Storage
   [cell (location : Location) (val : Value)])
@@ -15,6 +16,7 @@
 
 
 ; Value ;
+
 (define (num+ [l : Value] [r : Value]) : Value
     (cond
       [(and (numV? l) (numV? r))
@@ -32,13 +34,15 @@
 ; Expression-Core data type ;
 (define-type ExprC
    [numC  (n : number)]
-   [varC  (s : symbol)]
+   [idC   (s : symbol)]
    [appC  (fun : ExprC) (arg : ExprC)]
    [plusC (l : ExprC) (r : ExprC)]
    [multC (l : ExprC) (r : ExprC)]
    [lamC  (arg : symbol) (body : ExprC)]
-   [setC  (var : symbol) (arg : ExprC)]
-   [seqC  (b1 : ExprC) (b2 : ExprC)])
+   [boxC (arg : ExprC)]
+   [unboxC (arg : ExprC)]
+   [setboxC (b : ExprC) (v : ExprC)]
+   [seqC (b1 : ExprC) (b2 : ExprC)])
 
 ; Environment ;
 
@@ -69,6 +73,7 @@
              (cell-val (first sto))]
             [else (fetch loc (rest sto))])]))
 
+
 (define new-loc
   (let ([n (box 0)])
     (lambda ()
@@ -81,22 +86,25 @@
 ; Expression-Surface data type ;
 (define-type ExprS
    [numS (n : number)]
-   [varS   (s : symbol)]
+   [idS   (s : symbol)]
    [plusS (l : ExprS) (r : ExprS)]
    [multS (l : ExprS) (r : ExprS)]
    [uminusS (e : ExprS)]
    [bminusS (l : ExprS) (r : ExprS)]
    [lamS (arg : symbol) (body : ExprS)]
    [letS (s : symbol) (v : ExprS) (body : ExprS)]
+   [beginS (first : ExprS) (second : ExprS)]
    [appS  (fun : ExprS) (arg : ExprS)]
-   [setS  (var : symbol) (arg : ExprS)]
+   [boxS (arg : ExprS)]
+   [unboxS (arg : ExprS)]
+   [setboxS (b : ExprS) (v : ExprS)]
    [seqS (b1 : ExprS) (b2 : ExprS)])
 
 ; Parser (s-expr -> ExprS) ;
 (define (parse [s : s-expression]) : ExprS
     (cond
       [(s-exp-number?  s) (numS  (s-exp->number  s))]
-      [(s-exp-symbol? s) (varS (s-exp->symbol s))]
+      [(s-exp-symbol? s) (idS (s-exp->symbol s))]
       [(s-exp-list? s)
        (let ([sl (s-exp->list s)])
          (case (s-exp->symbol (first sl))
@@ -114,18 +122,21 @@
     (type-case ExprS as
       ;; core
       [numS  (n)     (numC n)]
-      [varS  (s)     (varC s)]
+      [idS   (s)     (idC s)]
       [plusS (l r)   (plusC (desugar l)
                             (desugar r))]
       [multS (l r)   (multC (desugar l)
                             (desugar r))]
       [lamS  (a b)   (lamC a (desugar b))]
       [appS  (f a)   (appC (desugar f) (desugar a))]
-      [setS (v a)    (setC v (desugar a))]
+      [boxS (a)      (boxC (desugar a))]
+      [unboxS (a)    (unboxC (desugar a))]
+      [setboxS (b v) (setboxC (desugar b) (desugar v))]
       [seqS (b1 b2)  (seqC (desugar b1) (desugar b2))]       
       
       ;; syntactic sugar
-      [letS (s v b)  (appC (lamC s (desugar b)) (desugar v))] ; ?bb
+      [letS (s v b)  (appC (lamC s (desugar b)) (desugar v))] ; ?
+      [beginS (f s)   (desugar (letS '_ f s))] ;?
       [uminusS (e)   (multC (numC -1) (desugar e))]
       [bminusS (l r) (plusC (desugar l)
                             (multC (numC -1) (desugar r)))]))
@@ -134,7 +145,7 @@
  (define (interp [expr : ExprC] [env : Env] [sto : Store]) : Result
     (type-case ExprC expr
       [numC (n) (v*s (numV n) sto)]
-      [varC (s) (v*s (fetch (lookup s env) sto) sto)]
+      [idC (n) (v*s (fetch (lookup n env) sto) sto)]
       [plusC (l r) (type-case Result (interp l env sto)
                [v*s (v-l s-l)
                     (type-case Result (interp r env s-l)
@@ -157,9 +168,21 @@
                                                       where)
                                                 (closV-env v-f))
                                     (override-store (cell where v-a) s-a)))])])]
-      [setC (v a) (type-case Result (interp a env sto)
+      [boxC (a) (type-case Result (interp a env sto)
+              [v*s (v-a s-a)
+                   (let ([where (new-loc)])
+                     (v*s (boxV where)
+                          (override-store (cell where v-a)
+                                          s-a)))])]
+      [unboxC (a) (type-case Result (interp a env sto)
+                [v*s (v-a s-a)
+                     (v*s (fetch (boxV-l v-a) s-a) s-a)])]
+      [setboxC (b v) (type-case Result (interp b env sto)
                    [v*s (v-b s-b)
-                        ])]
+                        (type-case Result (interp v env s-b)
+                          [v*s (v-v s-v)
+                               (v*s v-v ; returns value, not box?
+                                    (override-store (cell (boxV-l v-b) v-v) s-v))])])]
       [seqC (b1 b2) (type-case Result (interp b1 env sto)
                   [v*s (v-b1 s-b1)
                        (interp b2 env s-b1)])]))
@@ -187,6 +210,28 @@
                         (numC 3)))
           (numV 7))
 
+; 8
 
 (test (eval-exprs (plusS (numS 10) (appS (lamS '_ (numS 5)) (numS 10))))
         (numV 15))
+
+(test (eval-exprs  (unboxS (boxS (numS 3))))
+       (numV 3))
+
+(test (eval-exprs (letS 'b (boxS (numS 0))
+                         (setboxS (idS 'b) (numS 2))))
+     (numV 2))
+
+(test (eval-exprs (letS 'b (boxS (numS 1)) (setboxS (idS 'b) (plusS (numS 4) (unboxS (idS 'b))))))
+       (numV 5))
+
+(test (eval-exprs (unboxS (letS 'b (boxS (numS 1)) (boxS (plusS (numS 1) (unboxS (idS 'b)))))))
+        (numV 2))
+
+(test/exn (eval-exprs (plusS (letS 'b (boxS (numS 0)) (numS 1)) (idS 'b)))
+      "name not found") 
+
+(test (eval-exprs (letS 'b (boxS (numS -2)) (seqS (setboxS (idS 'b) (plusS (numS 1) (unboxS (idS 'b))))
+                                                              (setboxS (idS 'b) (plusS (numS 1) (unboxS (idS 'b))))))) 
+        (numV 0))
+        
